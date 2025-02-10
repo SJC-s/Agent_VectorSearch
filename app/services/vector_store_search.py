@@ -1,3 +1,4 @@
+# app/services/vector_store_search.py
 import os
 import json
 import logging
@@ -49,6 +50,9 @@ class VectorStoreSearch:
         return score
 
     def _llm_rerank(self, docs: List[Document], user_ner: dict) -> List[Document]:
+        """
+        LLM을 이용해 문서를 다시 평가(점수화)하여 랭킹 재조정
+        """
         if not docs:
             return []
 
@@ -129,6 +133,9 @@ class VectorStoreSearch:
         return [x[0] for x in sorted_docs]
 
     def _get_job_synonyms_with_llm(self, job: str) -> List[str]:
+        """
+        LLM을 통해 입력된 직무에 대한 동의어(유사한 용어) 리스트 추출
+        """
         openai_api_key = os.environ.get("OPENAI_API_KEY")
         if not openai_api_key:
             logger.warning("OPENAI_API_KEY 미설정: 직무 동의어 확장 불가")

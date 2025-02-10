@@ -18,6 +18,7 @@ FastApi_SeniorJobGo/
 │   │   └── job_advisor.py                # LangGraph 에이전트 (도구 포함)
 │   ├── models/
 │   │   ├── __init__.py
+│   │   ├── profile.py
 │   │   └── schemas.py                    # Pydantic 모델
 │   ├── core/
 │   │   ├── __init__.py

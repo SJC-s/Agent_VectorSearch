@@ -14,3 +14,6 @@ class Settings:
     ]
 
 settings = Settings() 
+
+# from sqlalchemy import create_engine, text
+# engine = create_engine(DATABASE_URL, pool_recycle=3600, pool_size=5, max_overflow=10)
