@@ -1,7 +1,8 @@
 # app/routes/chat_router.py
 import logging
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, HTTPException
 from app.models.schemas import ChatRequest, ChatResponse, JobPosting
+from app.agents.job_advisor import handle_chat
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -9,33 +10,23 @@ router = APIRouter()
 @router.post("/chat/", response_model=ChatResponse)
 async def chat(request: Request, chat_request: ChatRequest) -> ChatResponse:
     """
-    /api/v1/chat/ 엔드포인트
-    1) job_advisor_agent를 얻어온다.
-    2) chat_request.user_message, user_profile을 전달해 에이전트 호출
-    3) 결과(딕셔너리)를 ChatResponse로 변환
+    /api/v1/chat/ 엔드포인트:
+    1) Request 객체를 통해 app.state에서 job_advisor_graph와 vector_search_obj를 가져옵니다.
+    2) chat_request를 통해 사용자 메시지 및 프로필 정보를 state에 담고, vector_search_obj도 함께 전달합니다.
+    3) 그래프 실행 후, state["final_answer"] 및 state["job_postings"]를 ChatResponse로 반환합니다.
     """
-    try:
-        logger.info(f"[ChatRouter] 사용자의 메시지: {chat_request.user_message}")
-        job_advisor_agent = request.app.state.job_advisor_agent
-        if job_advisor_agent is None:
-            logger.error("[ChatRouter] job_advisor_agent가 초기화되지 않음")
-            return ChatResponse(
-                message="서버가 준비되지 않았습니다.",
-                jobPostings=[],
-                type="error",
-                user_profile={}
-            )
-        
-        # 에이전트 호출(비동기)
-        response = await job_advisor_agent.chat(
-            query=chat_request.user_message,
-            user_profile=chat_request.user_profile
-        )
-        logger.info("[ChatRouter] 에이전트 응답 완료")
+    if not chat_request.user_message:
+        raise HTTPException(status_code=400, detail="사용자 메시지가 필요합니다.")
 
-        # jobPostings
+    try:
+        # (1) job_advisor 호출
+        response_data = handle_chat(query=chat_request.user_message, user_profile=chat_request.user_profile)
+        logger.info(f"[chat_endpoint] job_advisor result={response_data}")
+
+        # (2) jobPostings 변환
+        job_postings_raw = response_data.get("jobPostings", [])
         job_postings_list = []
-        for idx, jp in enumerate(response.get("jobPostings", [])):
+        for idx, jp in enumerate(job_postings_raw, start=1):
             job_postings_list.append(JobPosting(
                 id=jp.get("id", "no_id"),
                 location=jp.get("location", ""),
@@ -43,23 +34,17 @@ async def chat(request: Request, chat_request: ChatRequest) -> ChatResponse:
                 title=jp.get("title", ""),
                 salary=jp.get("salary", ""),
                 workingHours=jp.get("workingHours", "정보없음"),
-                description=jp.get("description", ""),
-                rank=jp.get("rank", idx+1)
+                description="",
+                rank=idx
             ))
 
-        # ChatResponse 모델 생성
+        # (3) 최종 ChatResponse
         return ChatResponse(
-            message=response.get("message", ""),
+            message=response_data.get("message", ""),
             jobPostings=job_postings_list,
-            type=response.get("type", "info"),
-            user_profile=response.get("user_profile", {})
+            type=response_data.get("type", "info"),
+            user_profile=response_data.get("user_profile", {})
         )
-
     except Exception as e:
-        logger.error(f"[ChatRouter] 전체 처리 중 에러: {str(e)}", exc_info=True)
-        return ChatResponse(
-            message="처리 중 오류가 발생했습니다.",
-            jobPostings=[],
-            type="error",
-            user_profile={}
-        )
+        logger.error(f"[chat_endpoint] 처리 중 오류: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
