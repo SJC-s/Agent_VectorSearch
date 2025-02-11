@@ -2,7 +2,7 @@
 import logging
 from fastapi import APIRouter, Request, HTTPException
 from app.models.schemas import ChatRequest, ChatResponse, JobPosting
-from app.agents.job_advisor import handle_chat
+from app.agents.job_advisor import ChatHandler
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -19,14 +19,25 @@ async def chat(request: Request, chat_request: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=400, detail="사용자 메시지가 필요합니다.")
 
     try:
-        # (1) job_advisor 호출
-        response_data = handle_chat(query=chat_request.user_message, user_profile=chat_request.user_profile)
-        logger.info(f"[chat_endpoint] job_advisor result={response_data}")
+        # app.state에서 vector_search 객체를 가져옵니다.
+        vector_search_obj = getattr(request.app.state, "vector_search", None)
+        if vector_search_obj is None:
+            raise HTTPException(status_code=500, detail="vector_search 객체가 준비되지 않았습니다.")
 
-        # (2) jobPostings 변환
-        job_postings_raw = response_data.get("jobPostings", [])
+        # 2. 핸들러 초기화
+        handler = ChatHandler(vector_search_obj)
+        
+        # 3. 비동기 처리
+        result = await handler.process_query(
+            query=chat_request.user_message,
+            profile=chat_request.user_profile
+        )
+        logger.info(f"[chat_endpoint] ChatHandler 결과: {result}")
+        # result는 {"messages": ..., "job_postings": [...], "type": ..., "user_profile": ...} 형태
+
+        # jobPostings 배열을 JobPosting 모델로 변환 (필요 시)
         job_postings_list = []
-        for idx, jp in enumerate(job_postings_raw, start=1):
+        for idx, jp in enumerate(result.get("job_postings", []), start=1):
             job_postings_list.append(JobPosting(
                 id=jp.get("id", "no_id"),
                 location=jp.get("location", ""),
@@ -37,13 +48,11 @@ async def chat(request: Request, chat_request: ChatRequest) -> ChatResponse:
                 description="",
                 rank=idx
             ))
-
-        # (3) 최종 ChatResponse
         return ChatResponse(
-            message=response_data.get("message", ""),
-            jobPostings=job_postings_list,
-            type=response_data.get("type", "info"),
-            user_profile=response_data.get("user_profile", {})
+            message=result.get("message", ""),
+            job_postings=job_postings_list,
+            type=result.get("type", "info"),
+            user_profile=result.get("user_profile", {})
         )
     except Exception as e:
         logger.error(f"[chat_endpoint] 처리 중 오류: {str(e)}", exc_info=True)

@@ -12,12 +12,15 @@ from app.core.config import settings
 from langchain_openai import ChatOpenAI
 from app.services.vector_store_search import VectorStoreSearch
 from app.services.vector_store_ingest import VectorStoreIngest
-from app.agents.job_advisor import build_job_advisor_graph
+from app.agents.job_advisor import JobAdvisorGraph
 from app.routes import chat_router
 from contextlib import asynccontextmanager
 
-load_dotenv()
+# 로깅 설정
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -29,17 +32,11 @@ async def lifespan(app: FastAPI):
         
         logger.info("벡터 스토어 검색 객체를 초기화합니다. (search)")
         vector_search = VectorStoreSearch(collection)
+        app.state.vector_search = vector_search  # vector_search를 app.state에 저장
         
-        logger.info("LLM과 에이전트를 초기화합니다.")
-        llm = ChatOpenAI(
-            model_name="gpt-4o-mini",
-            temperature=0.7
-        )
-        
-        app.state.graph = build_job_advisor_graph(
-            llm=llm,
-            vector_search=vector_search  # 검색 전용 객체 주입
-        )
+        global graph
+        graph = JobAdvisorGraph(vector_search)
+        app.state.graph = graph
         logger.info("초기화 완료")
         
         
@@ -47,8 +44,8 @@ async def lifespan(app: FastAPI):
         logger.error(f"초기화 중 오류 발생: {str(e)}", exc_info=True)
         raise
         
-    yield
-    
+    yield  # lifespan 종료 시점
+
     # shutdown
     logger.info("서버를 종료합니다...")
 

@@ -31,9 +31,5 @@ class ChatResponse(BaseModel):
     message: str
     type: str
     user_profile: Dict
-    jobPostings: List[JobPosting] = []
+    job_postings: List[JobPosting] = []
 
-
-class StateDict:
-    messages: list  # [BaseMessage] 비슷한 구조
-    user_profile: dict
