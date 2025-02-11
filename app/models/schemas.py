@@ -2,6 +2,7 @@
 
 from typing import Optional, Dict, List
 from pydantic import BaseModel
+from langchain_core.messages import BaseMessage
 
 class ChatRequest(BaseModel):
     """
@@ -9,7 +10,16 @@ class ChatRequest(BaseModel):
     """
     user_message: str
     session_id: str
-    user_profile: Dict = {}
+    user_profile: Dict = {
+        "age": None,
+        "location": None,
+        "jobType": None,  # 프론트엔드의 필드명과 일치
+        "experience": [],
+        "preferred_jobs": [],
+        "skills": [],
+        "education": None,
+        "job_status": None
+    }
 
 class JobPosting(BaseModel):
     """
@@ -31,4 +41,8 @@ class ChatResponse(BaseModel):
     message: str
     type: str
     user_profile: Dict
-    jobPostings: List[JobPosting] = []
+    job_postings: List[JobPosting] = []
+
+class StateDict(BaseModel):
+    messages: List[BaseMessage]
+    user_profile: Dict

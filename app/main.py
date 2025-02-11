@@ -5,7 +5,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from langchain_openai import ChatOpenAI
 from app.core.config import settings
 from app.routes import chat_router
-from app.agents.job_advisor import JobAdvisorAgent
 from app.services.vector_store_ingest import VectorStoreIngest
 from app.services.vector_store_search import VectorStoreSearch
 
@@ -27,17 +26,8 @@ async def lifespan(app: FastAPI):
         
         logger.info("벡터 스토어 검색 객체를 초기화합니다. (search)")
         vector_search = VectorStoreSearch(collection)
-        
-        logger.info("LLM과 에이전트를 초기화합니다.")
-        llm = ChatOpenAI(
-            model_name="gpt-4o-mini",
-            temperature=0.7
-        )
-        
-        app.state.job_advisor_agent = JobAdvisorAgent(
-            llm=llm,
-            vector_search=vector_search  # 검색 전용 객체 주입
-        )
+
+        app.state.vector_search = vector_search
         logger.info("초기화 완료")
         
         
