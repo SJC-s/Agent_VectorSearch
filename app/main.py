@@ -12,7 +12,7 @@ from app.core.config import settings
 from langchain_openai import ChatOpenAI
 from app.services.vector_store_search import VectorStoreSearch
 from app.services.vector_store_ingest import VectorStoreIngest
-from app.agents.job_advisor import JobAdvisorGraph
+from app.agents.job_advisor import build_job_advisor_graph
 from app.routes import chat_router
 from contextlib import asynccontextmanager
 
@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
         app.state.vector_search = vector_search  # vector_search를 app.state에 저장
         
         global graph
-        graph = JobAdvisorGraph(vector_search)
+        graph = build_job_advisor_graph()
         app.state.graph = graph
         logger.info("초기화 완료")
         
@@ -60,6 +60,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 전역 변수
+vector_store = None
+job_advisor_agent = None
+llm = None
 
 app.include_router(chat_router.router, prefix="/api/v1")
 
