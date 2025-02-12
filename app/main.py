@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
         )
 
         global graph
-        graph = build_job_advisor_graph(llm=llm_instance, vector_search=vector_search)
+        graph = build_job_advisor_graph(llm=llm_instance)
         app.state.graph = graph
         logger.info("초기화 완료")
         

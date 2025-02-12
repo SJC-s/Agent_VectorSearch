@@ -3,6 +3,30 @@ import logging
 from fastapi import APIRouter, Request, HTTPException
 from app.models.schemas import ChatRequest, ChatResponse, JobPosting
 from app.agents.job_advisor import handle_chat
+from langchain.schema import HumanMessage, AIMessage, SystemMessage
+
+
+def serialize_message(msg):
+    """메시지 객체를 직렬화 가능한 형태로 변환"""
+    if isinstance(msg, (HumanMessage, AIMessage, SystemMessage)):
+        return {
+            "type": msg.__class__.__name__,
+            "content": msg.content,
+            "additional_kwargs": msg.additional_kwargs
+        }
+    return str(msg)
+
+def serialize_state(state):
+    """상태 객체를 직렬화 가능한 형태로 변환"""
+    serialized = {}
+    for key, value in state.items():
+        if key == "messages":
+            serialized[key] = [serialize_message(msg) for msg in value]
+        elif isinstance(value, (list, dict)):
+            serialized[key] = value
+        else:
+            serialized[key] = str(value)
+    return serialized
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -26,10 +50,11 @@ async def chat(request: Request, chat_request: ChatRequest) -> ChatResponse:
 
         result = handle_chat(
             query=chat_request.user_message,
-            user_profile=chat_request.user_profile,
-            vector_search=vector_search_obj
+            user_profile=chat_request.user_profile
         )
-        logger.info(f"[chat_endpoint] handle_chat 결과: {result}")
+         # 로깅을 위해 결과를 직렬화
+        serialized_result = serialize_state(result)
+        logger.info(f"[chat_endpoint] handle_chat 결과: {serialized_result}")
         # result는 {"messages": ..., "job_postings": [...], "type": ..., "user_profile": ...} 형태
 
         
