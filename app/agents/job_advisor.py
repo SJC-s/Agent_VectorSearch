@@ -20,6 +20,8 @@ from operator import add
 from langchain_core.prompts import PromptTemplate
 from langchain.schema import HumanMessage, SystemMessage, AIMessage
 from langgraph.prebuilt import ToolNode, tools_condition
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema import StrOutputParser
 
 # 프로젝트 내 파일들
 from app.models.profile import UserProfile
@@ -104,8 +106,8 @@ def setup_openai(temperature: float):
 @tool
 def user_ner_tool(input_data: dict) -> Dict[str, Any]:
     """
-    (1) 사용자 입력 NER 추출
-    (1-1) NER 데이터가 없거나 누락된 항목은 user_profile (age, location, jobType)로 보완
+    user_ner 값이 없을 경우 무조건 수행
+    사용자 입력 NER 추출하여 벡터 검색 flow, NER 데이터가 없거나 누락된 항목은 user_profile (age, location, jobType)로 보완
     입력 데이터: {"user_message": str, "user_profile": dict}
     """
     user_message = input_data.get("messages", "")
@@ -236,6 +238,7 @@ def final_response_tool(input_data: Dict) -> str:
 ###############################################################################
 def user_ner_node(state: Dict) -> Dict:
     """
+    사용자 입력 NER 추출하여 벡터 검색 flow, NER 데이터가 없거나 누락된 항목은 user_profile (age, location, jobType)로 보완
     user_ner_tool 호출 -> state["user_ner"]에 저장
     """
     user_input = state["messages"]
@@ -343,45 +346,63 @@ def build_job_advisor_graph(llm: ChatOpenAI, vector_search: VectorStoreSearch) -
     """
     # 1) LLM 준비
     llm = setup_openai(0.5)
-    tools = [vector_search_tool, profile_update_tool, final_response_tool]
+    tools = [user_ner_tool, final_response_tool]
 
     llm_with_tools = llm.bind_tools(tools)
 
     builder = StateGraph(StateDict)
 
-    # 3) 메인 챗봇 노드
     def chatbot_node(state: Dict):
         try:
-            # 시스템 메시지와 사용자 프로필 정보 추가
-            messages = [SystemMessage(content=SYSTEM_PROMPT)]
-            
-            # 기존 메시지 추가
-            if hasattr(state, 'messages') and state.messages:
-                for msg in state.messages:
-                    if isinstance(msg, (HumanMessage, SystemMessage, AIMessage)):
-                        messages.append(msg)
-                    elif isinstance(msg, dict) and 'content' in msg:
-                        if msg.get('role') == 'user':
-                            messages.append(HumanMessage(content=msg['content']))
-                        elif msg.get('role') == 'assistant':
-                            messages.append(AIMessage(content=msg['content']))
-                        elif msg.get('role') == 'system':
-                            messages.append(SystemMessage(content=msg['content']))
-            
-            # 프로필 정보를 문자열로 변환하여 컨텍스트에 추가
-            if hasattr(state, 'user_profile') and state.user_profile:
-                profile_info = f"\n현재 사용자 정보:\n{str(state.user_profile)}"
-                messages.append(SystemMessage(content=profile_info))
+            # 마지막 메시지가 AIMessage인지 확인
+            if state["messages"] and isinstance(state["messages"][-1], AIMessage):
+                # 기존 메시지 사용
+                messages = state["messages"]
+            else:
+                # 시스템 메시지와 사용자 메시지 추가
+                messages = [
+                    SystemMessage(content=SYSTEM_PROMPT),
+                    state["messages"][-1] if state["messages"] else HumanMessage(content="hi")  # type: ignore
+                ]
             
             # LLM 호출
             response = llm_with_tools.invoke(messages)
-            return {"messages": [response]}
+            ai_message = AIMessage(content=response)  # 응답을 AIMessage로 래핑
+            return {"messages": [ai_message]}
             
         except Exception as e:
             print(f"챗봇 노드 처리 중 오류: {str(e)}")
             return {"messages": [AIMessage(content="죄송합니다. 응답을 생성하는 중에 문제가 발생했습니다. 다시 한 번 말씀해 주시겠어요?")]}
+    
+    # 2) 툴 선택 함수
+    def get_tool_choice(state: Dict) -> str:
+        """LLM을 사용하여 도구를 선택합니다."""
+        messages = state["messages"]
+        
+        # 마지막 메시지가 AIMessage인지 확인
+        if not messages or not isinstance(messages[-1], AIMessage):
+            logger.warning("마지막 메시지가 AIMessage가 아닙니다.")
+            return "final_response_tool"  # 기본 도구 선택
 
-    # 노드 등록
+        # 툴 선택 프롬프트
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a helpful assistant. Choose the best tool to use based on the user query."),
+            ("system", "Here are the available tools: {tool_names}"),
+            ("user", "{user_query}"),
+        ])
+
+        # 사용 가능한 툴 이름 목록 생성
+        tool_names = [tool.name for tool in tools]
+        
+        # 툴 선택
+        chain = prompt | llm | StrOutputParser()
+        tool_choice = chain.invoke({"user_query": messages[-1].content, "tool_names": tool_names})
+        
+        logger.info(f"선택된 도구: {tool_choice}")
+        return tool_choice
+    
+    # 3) 노드 정의
+    builder = StateGraph(StateDict)
     builder.add_node("chatBot", chatbot_node)
     builder.add_node("userNer", user_ner_node)
     builder.add_node("profileUpdate", profile_update_node)
@@ -392,16 +413,16 @@ def build_job_advisor_graph(llm: ChatOpenAI, vector_search: VectorStoreSearch) -
     tool_node = ToolNode(tools=tools)
     builder.add_node("tools", tool_node)
 
-    # 엣지 연결
-    # 조건부 라우팅
-    builder.add_edge("tools", "chatBot")
-    builder.add_edge(START, "userNer")
-    builder.add_edge("userNer", "chatBot")
-    builder.add_conditional_edges("chatBot", tools_condition)
+    # 4) 엣지 연결
+    # 도구 선택 -> 도구 실행 -> 챗봇
+    builder.add_conditional_edges(START, get_tool_choice, {
+        "user_ner_tool": "userNer",
+        "final_response_tool": "finalResponse"
+    })
     builder.add_edge("userNer", "profileUpdate")
     builder.add_edge("profileUpdate", "vectorSearch")
-    builder.add_edge("vectorSearch", "finalResponse")
-    builder.add_edge("finalResponse", END)
+    builder.add_edge("vectorSearch", "chatBot")
+    builder.add_edge("finalResponse", END) # 최종 응답 후 종료
 
     memory = MemorySaver()
     graph = builder.compile(checkpointer=memory)
