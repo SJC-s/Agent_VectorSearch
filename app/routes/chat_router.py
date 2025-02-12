@@ -34,10 +34,10 @@ async def chat(request: Request, chat_request: ChatRequest) -> ChatResponse:
 
         
         return ChatResponse(
-            message=result.get("message", ""),
-            jobPostings=result.get("job_postings", []),
-            type=result.get("type", "info"),
-            user_profile=result.get("user_profile", {})
+            message=result["message"],
+            jobPostings=result["jobPostings"],
+            type=result["type"],
+            user_profile=result["user_profile"]
         )
     except Exception as e:
         logger.error(f"[chat_endpoint] 처리 중 오류: {str(e)}", exc_info=True)

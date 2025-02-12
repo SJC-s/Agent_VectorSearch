@@ -48,10 +48,12 @@ class StateDict(BaseModel):
 
     class Config:
         extra = "allow"  # 추가 필드 허용
-        allow_mutation = True  # 모델 변경 가능하게 설정
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+    
+    def __setitem__(self, key: str, value: Any) -> None:
+        setattr(self, key, value)
 
 # --- 기존 get_user_ner_runnable 정의 (함수 형태) ---
 def get_user_ner_runnable() -> Runnable:
@@ -234,10 +236,10 @@ def final_response_tool(input_data: Dict) -> str:
 ###############################################################################
 def user_ner_node(state: Dict) -> Dict:
     """
-    user_ner_tool 호출 -> state["ner_result"]에 저장
+    user_ner_tool 호출 -> state["user_ner"]에 저장
     """
-    user_input = state.get("messages", "")
-    user_profile = state.get("user_profile", {})
+    user_input = state["messages"]
+    user_profile = state["user_profile"]
 
     logger.info(f"[user_ner_node] user_input={user_input}")
     logger.info(f"[user_ner_node] user_profile={user_profile}")
@@ -251,16 +253,17 @@ def user_ner_node(state: Dict) -> Dict:
     })
     # 수정된 부분: 새 객체 생성 후 필드 추가
     state.user_ner = ner_dict
-    logger.info(f"[user_ner_node] ner_dict={ner_dict}")
+    logger.info(f"[user_ner_node] state={state}")
     return state
 
 def profile_update_node(state: Dict) -> Dict:
     """
     profile_update_tool 호출 -> state["profile_summary"]에 저장
     """
-    ner_dict = state.get("ner_result", {})
+    ner_dict = state["user_ner"]
     summary = profile_update_tool.invoke({"ner_data": ner_dict})
     state.profile_summary = summary
+    logger.info(f"[profile_update_node] 업데이트 후 state: {state}")
     return state
 
 def vector_search_node(state: Dict) -> Dict:
@@ -288,6 +291,7 @@ def vector_search_node(state: Dict) -> Dict:
             "rank": i
         })
     state.job_postings = job_list
+    logger.info(f"[vector_search_node] 업데이트 후 state: {state}")
     return state
 
 def final_response_node(state: Dict) -> Dict:
@@ -295,9 +299,9 @@ def final_response_node(state: Dict) -> Dict:
     최종 응답 도출: 사용자 입력, 프로필 요약, 검색 결과를 종합하여 final_response_tool을 호출하고,
     결과를 state["final_answer"]에 저장합니다.
     """
-    messages = state.get("messages", "")
-    user_profile = state.get("user_profile", "")
-    postings = state.get("job_postings", [])
+    messages = state["messages"]
+    user_profile = state["user_profile"]
+    postings = state["job_postings"]
 
     logger.info(f"[final_response_node] postings={postings}")
 
@@ -323,8 +327,9 @@ def final_response_node(state: Dict) -> Dict:
             description="",
             rank=idx
         ))
-    state.job_postings = job_postings_list
-    state.final_answer = answer
+    state["job_postings"] = job_postings_list
+    state["final_answer"] = answer
+    logger.info(f"[final_response_node] 최종 state: {state}")
     return state
 
 ###############################################################################
@@ -338,7 +343,7 @@ def build_job_advisor_graph(llm: ChatOpenAI, vector_search: VectorStoreSearch) -
     """
     # 1) LLM 준비
     llm = setup_openai(0.5)
-    tools = [vector_search_tool, user_ner_tool, profile_update_tool, final_response_tool]
+    tools = [vector_search_tool, profile_update_tool, final_response_tool]
 
     llm_with_tools = llm.bind_tools(tools)
 
@@ -368,7 +373,6 @@ def build_job_advisor_graph(llm: ChatOpenAI, vector_search: VectorStoreSearch) -
                 profile_info = f"\n현재 사용자 정보:\n{str(state.user_profile)}"
                 messages.append(SystemMessage(content=profile_info))
             
-            logger.info(f"[chat_node] ner_result 확인: {state['ner_result']}")
             # LLM 호출
             response = llm_with_tools.invoke(messages)
             return {"messages": [response]}
@@ -421,28 +425,32 @@ def handle_chat(query: str, user_profile: Dict[str, Any], vector_search: VectorS
         messages=[HumanMessage(content=query)],
         user_profile=user_profile
     )
+    logger.info(f"[handle_chat] state 시작: {state}")
 
     llm_instance = setup_openai(0.5)
 
     # 그래프 빌드
     graph = build_job_advisor_graph(llm=llm_instance, vector_search=vector_search)
 
-    logger.info(f"[handle_chat] graph 결과: {graph}")
+    logger.info(f"[handle_chat] state 중간: {state}")
 
 
     # 동기 실행 (stream을 사용하여 상태를 업데이트)
-    events = graph.stream(
+    result  = graph.invoke(
         state,
         {"configurable": {"thread_id": "demo-user"}},
-        stream_mode="values"
+        # stream_mode="values"
     )
-    for _ in events:
-        pass
+    # 결과 업데이트
+    state.user_ner = result.get("user_ner", {})
+    state.profile_summary = result.get("profile_summary", "")
+    state.job_postings = result.get("job_postings", [])
+    state.final_answer = result.get("final_answer", "")
 
     logger.info(f"[handle_chat] state 결과: {state}")
 
-    final_answer = state.get("final_answer", "")
-    job_postings = state.get("job_postings", [])
+    final_answer = state["final_answer"]
+    job_postings = state["job_postings"]
     msg_type = "jobPosting" if job_postings else "info"
 
     return {
