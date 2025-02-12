@@ -186,8 +186,10 @@ class VectorStoreSearch:
 
         if len(conditions) > 1:
             filter_condition = {"$and": conditions}
-        else:
+        elif len(conditions) == 1:
             filter_condition = conditions[0]
+        else:
+            filter_condition = None  # 조건이 없으면 None을 전달합니다.
 
         results_with_score = self.vectorstore.similarity_search_with_score(
             query=query,
@@ -211,8 +213,9 @@ class VectorStoreSearch:
         5) 필터 없이 임베딩
         6) LLM 재랭킹
         """
-        region = user_ner.get("지역", "").strip()
-        job = user_ner.get("직무", "").strip()
+        region = (user_ner.get("지역") or "").strip()
+        job = (user_ner.get("직무") or "").strip()
+
 
         combined_query = f"{region} {job}".strip()
 

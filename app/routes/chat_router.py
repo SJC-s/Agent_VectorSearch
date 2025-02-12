@@ -32,22 +32,10 @@ async def chat(request: Request, chat_request: ChatRequest) -> ChatResponse:
         logger.info(f"[chat_endpoint] handle_chat 결과: {result}")
         # result는 {"messages": ..., "job_postings": [...], "type": ..., "user_profile": ...} 형태
 
-        # jobPostings 배열을 JobPosting 모델로 변환 (필요 시)
-        job_postings_list = []
-        for idx, jp in enumerate(result.get("job_postings", []), start=1):
-            job_postings_list.append(JobPosting(
-                id=jp.get("id", "no_id"),
-                location=jp.get("location", ""),
-                company=jp.get("company", ""),
-                title=jp.get("title", ""),
-                salary=jp.get("salary", ""),
-                workingHours=jp.get("workingHours", "정보없음"),
-                description="",
-                rank=idx
-            ))
+        
         return ChatResponse(
             message=result.get("message", ""),
-            job_postings=job_postings_list,
+            jobPostings=result.get("job_postings", []),
             type=result.get("type", "info"),
             user_profile=result.get("user_profile", {})
         )

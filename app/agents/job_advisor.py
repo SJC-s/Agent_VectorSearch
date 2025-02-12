@@ -3,7 +3,7 @@ import os
 import re
 import json
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Annotated
 from datetime import datetime
 
 # LangChain & Tools
@@ -14,6 +14,7 @@ from langchain.schema.runnable import Runnable
 # LangGraph
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
+from operator import add
 
 # LangChain Prompts
 from langchain_core.prompts import PromptTemplate
@@ -22,6 +23,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 # 프로젝트 내 파일들
 from app.models.profile import UserProfile
+from app.models.schemas import JobPosting
 from app.services.vector_store_search import VectorStoreSearch
 from app.services.vector_store_ingest import VectorStoreIngest
 from app.core.prompts import SYSTEM_PROMPT
@@ -37,11 +39,16 @@ GLOBAL_USER_PROFILE = UserProfile()
 # (A) StateDict Pydantic 모델 (추가 필드 허용)
 ###############################################################################
 class StateDict(BaseModel):
-    messages: list
+    messages: Annotated[List[Any], add]  # 다중 값 업데이트 허용
     user_profile: Dict[str, Any]
+    user_ner: Dict[str, Any] = {}         # NER 결과
+    profile_summary: str = ""             # 프로필 요약
+    job_postings: List[Any] = []          # 채용 공고 목록
+    final_answer: str = ""                # 최종 응답
 
     class Config:
-        extra = "allow"  # vector_search 등 추가 필드를 허용
+        extra = "allow"  # 추가 필드 허용
+        allow_mutation = True  # 모델 변경 가능하게 설정
 
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
@@ -57,11 +64,7 @@ def get_user_ner_runnable() -> Runnable:
     if not openai_api_key:
         raise ValueError("OPENAI_API_KEY is not set.")
 
-    llm = ChatOpenAI(
-        openai_api_key=openai_api_key,
-        model_name="gpt-4o-mini",
-        temperature=0.0
-    )
+    llm = setup_openai(0)
 
     prompt = PromptTemplate(
         input_variables=["user_query"],
@@ -80,14 +83,14 @@ def get_user_ner_runnable() -> Runnable:
     # PromptTemplate와 LLM을 체이닝하여 Runnable 반환
     return prompt | llm
 
-def setup_openai():
+def setup_openai(temperature: float):
     openai_api_key = os.environ.get("OPENAI_API_KEY")
     if not openai_api_key:
         raise ValueError("OPENAI_API_KEY가 설정되지 않았습니다.")
     
     llm = ChatOpenAI(
         model="gpt-4o-mini",
-        temperature=0.5,
+        temperature=temperature,
         streaming=True
     )
     return llm
@@ -179,7 +182,7 @@ def vector_search_tool(_: str) -> Dict[str, Any]:
     if not docs:
         return {
             "job_postings": [],
-            "message": "조건에 맞는 채용 공고가 없습니다."
+            "messages": "조건에 맞는 채용 공고가 없습니다."
         }
 
     job_postings = []
@@ -198,7 +201,7 @@ def vector_search_tool(_: str) -> Dict[str, Any]:
 
     return {
         "job_postings": job_postings,
-        "message": "채용 공고 검색 결과"
+        "messages": "채용 공고 검색 결과"
     }
 
 @tool
@@ -211,7 +214,7 @@ def final_response_tool(input_data: Dict) -> str:
     user_profile = input_data.get("user_profile", "")
     postings = input_data.get("job_postings", [])
 
-    llm = setup_openai()
+    llm = setup_openai(0.5)
     
     system_msg = SystemMessage(content=SYSTEM_PROMPT)
     user_prompt = (
@@ -224,7 +227,7 @@ def final_response_tool(input_data: Dict) -> str:
 
     logger.info(f"[final_response_tool] 최종 resp 결과: {resp}")
 
-    return resp.content
+    return resp
 
 ###############################################################################
 # (B) 각 Node 함수: Tool을 호출
@@ -247,22 +250,23 @@ def user_ner_node(state: Dict) -> Dict:
         }
     })
     # 수정된 부분: 새 객체 생성 후 필드 추가
-    new_state = state.model_copy(update={"ner_result": ner_dict})
-    logger.info(f"[user_ner_node] new_state={new_state}")
-    return new_state
+    state.user_ner = ner_dict
+    logger.info(f"[user_ner_node] ner_dict={ner_dict}")
+    return state
 
 def profile_update_node(state: Dict) -> Dict:
     """
     profile_update_tool 호출 -> state["profile_summary"]에 저장
     """
     ner_dict = state.get("ner_result", {})
-    summary = profile_update_tool.invoke(ner_dict)
-    state["profile_summary"] = summary
+    summary = profile_update_tool.invoke({"ner_data": ner_dict})
+    state.profile_summary = summary
     return state
 
 def vector_search_node(state: Dict) -> Dict:
     """
-    vector_search_tool 호출 -> state["job_postings"]
+    state["vector_search"] (메인에서 주입한 객체)를 사용하여 채용 검색을 수행하고,
+    결과를 state["job_postings"]에 저장합니다.
     """
     vector_search = VectorStoreSearch(vectorstore=VectorStoreIngest().setup_vector_store())  # ✅ 직접 초기화
     if not vector_search:
@@ -283,16 +287,19 @@ def vector_search_node(state: Dict) -> Dict:
             "salary": md.get("급여조건", ""),
             "rank": i
         })
-    state["job_postings"] = job_list
+    state.job_postings = job_list
     return state
 
 def final_response_node(state: Dict) -> Dict:
     """
-    final_response_tool 호출 -> state["final_answer"]
+    최종 응답 도출: 사용자 입력, 프로필 요약, 검색 결과를 종합하여 final_response_tool을 호출하고,
+    결과를 state["final_answer"]에 저장합니다.
     """
     messages = state.get("messages", "")
     user_profile = state.get("user_profile", "")
     postings = state.get("job_postings", [])
+
+    logger.info(f"[final_response_node] postings={postings}")
 
     payload = {
         "input_data": {  # Pydantic 모델 구조에 맞게 감싸기
@@ -302,20 +309,35 @@ def final_response_node(state: Dict) -> Dict:
         }
     }
     answer = final_response_tool.invoke(payload)
-    state["final_answer"] = answer
+    
+    # jobPostings 배열을 JobPosting 모델로 변환 (필요 시)
+    job_postings_list = []
+    for idx, jp in enumerate(postings, start=1):
+        job_postings_list.append(JobPosting(
+            id=str(jp.get("id", "no_id")),  # id를 문자열로 변환
+            location=jp.get("location", ""),
+            company=jp.get("company", ""),
+            title=jp.get("title", ""),
+            salary=jp.get("salary", ""),
+            workingHours=jp.get("workingHours", "정보없음"),
+            description="",
+            rank=idx
+        ))
+    state.job_postings = job_postings_list
+    state.final_answer = answer
     return state
 
 ###############################################################################
 # (C) 그래프 생성
 ###############################################################################
-def build_job_advisor_graph():
+def build_job_advisor_graph(llm: ChatOpenAI, vector_search: VectorStoreSearch) -> StateGraph:
     """
     LangGraph로 노드를 연결:
     START -> user_ner_node -> profile_update_node
           -> vector_search_node -> final_response_node -> END
     """
     # 1) LLM 준비
-    llm = setup_openai()
+    llm = setup_openai(0.5)
     tools = [vector_search_tool, user_ner_tool, profile_update_tool, final_response_tool]
 
     llm_with_tools = llm.bind_tools(tools)
@@ -323,7 +345,7 @@ def build_job_advisor_graph():
     builder = StateGraph(StateDict)
 
     # 3) 메인 챗봇 노드
-    def chatbot_node(state: StateDict):
+    def chatbot_node(state: Dict):
         try:
             # 시스템 메시지와 사용자 프로필 정보 추가
             messages = [SystemMessage(content=SYSTEM_PROMPT)]
@@ -346,6 +368,7 @@ def build_job_advisor_graph():
                 profile_info = f"\n현재 사용자 정보:\n{str(state.user_profile)}"
                 messages.append(SystemMessage(content=profile_info))
             
+            logger.info(f"[chat_node] ner_result 확인: {state['ner_result']}")
             # LLM 호출
             response = llm_with_tools.invoke(messages)
             return {"messages": [response]}
@@ -355,11 +378,11 @@ def build_job_advisor_graph():
             return {"messages": [AIMessage(content="죄송합니다. 응답을 생성하는 중에 문제가 발생했습니다. 다시 한 번 말씀해 주시겠어요?")]}
 
     # 노드 등록
-    builder.add_node("chatbot", chatbot_node)
-    builder.add_node("user_ner", user_ner_node)
-    builder.add_node("profile_update", profile_update_node)
-    builder.add_node("vector_search", vector_search_node)
-    builder.add_node("final_response", final_response_node)
+    builder.add_node("chatBot", chatbot_node)
+    builder.add_node("userNer", user_ner_node)
+    builder.add_node("profileUpdate", profile_update_node)
+    builder.add_node("vectorSearch", vector_search_node)
+    builder.add_node("finalResponse", final_response_node)
 
     # 도구 노드
     tool_node = ToolNode(tools=tools)
@@ -367,21 +390,19 @@ def build_job_advisor_graph():
 
     # 엣지 연결
     # 조건부 라우팅
-    builder.add_edge("tools", "chatbot")
-    builder.add_edge(START, "chatbot")
-    builder.add_conditional_edges("chatbot", tools_condition)
-    builder.add_edge("chatbot", "user_ner")
-    builder.add_edge("user_ner", "profile_update")
-    builder.add_edge("profile_update", "vector_search")
-    builder.add_edge("vector_search", "final_response")
-    builder.add_edge("final_response", END)
+    builder.add_edge("tools", "chatBot")
+    builder.add_edge(START, "userNer")
+    builder.add_edge("userNer", "chatBot")
+    builder.add_conditional_edges("chatBot", tools_condition)
+    builder.add_edge("userNer", "profileUpdate")
+    builder.add_edge("profileUpdate", "vectorSearch")
+    builder.add_edge("vectorSearch", "finalResponse")
+    builder.add_edge("finalResponse", END)
 
     memory = MemorySaver()
     graph = builder.compile(checkpointer=memory)
     return graph
 
-# 그래프 초기화
-graph = build_job_advisor_graph()
 
 ###############################################################################
 # (D) 통합 처리 함수: handle_chat
@@ -400,17 +421,25 @@ def handle_chat(query: str, user_profile: Dict[str, Any], vector_search: VectorS
         messages=[HumanMessage(content=query)],
         user_profile=user_profile
     )
-    # # 그래프 빌드
-    # graph = build_job_advisor_graph()
+
+    llm_instance = setup_openai(0.5)
+
+    # 그래프 빌드
+    graph = build_job_advisor_graph(llm=llm_instance, vector_search=vector_search)
+
+    logger.info(f"[handle_chat] graph 결과: {graph}")
+
 
     # 동기 실행 (stream을 사용하여 상태를 업데이트)
     events = graph.stream(
-        state.model_dump(),
+        state,
         {"configurable": {"thread_id": "demo-user"}},
         stream_mode="values"
     )
     for _ in events:
         pass
+
+    logger.info(f"[handle_chat] state 결과: {state}")
 
     final_answer = state.get("final_answer", "")
     job_postings = state.get("job_postings", [])
@@ -418,7 +447,7 @@ def handle_chat(query: str, user_profile: Dict[str, Any], vector_search: VectorS
 
     return {
         "message": final_answer,
-        "job_postings": job_postings,
+        "jobPostings": job_postings,
         "type": msg_type,
         "user_profile": user_profile
     }

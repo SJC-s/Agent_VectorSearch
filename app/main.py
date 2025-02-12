@@ -2,6 +2,7 @@
 import uvicorn
 import signal
 import sys
+import os
 import logging
 
 from fastapi import FastAPI
@@ -34,8 +35,14 @@ async def lifespan(app: FastAPI):
         vector_search = VectorStoreSearch(collection)
         app.state.vector_search = vector_search  # vector_search를 app.state에 저장
         
+        llm_instance = ChatOpenAI(
+            openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+            model_name="gpt-4o-mini",
+            temperature=0.5
+        )
+
         global graph
-        graph = build_job_advisor_graph()
+        graph = build_job_advisor_graph(llm=llm_instance, vector_search=vector_search)
         app.state.graph = graph
         logger.info("초기화 완료")
         

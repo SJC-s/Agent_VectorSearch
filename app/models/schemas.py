@@ -31,5 +31,5 @@ class ChatResponse(BaseModel):
     message: str
     type: str
     user_profile: Dict
-    job_postings: List[JobPosting] = []
+    jobPostings: List[JobPosting] = []
 
