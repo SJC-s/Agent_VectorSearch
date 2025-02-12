@@ -100,48 +100,51 @@ def setup_openai(temperature: float):
 ###############################################################################
 
 @tool
-def user_ner_tool(input_data: dict) -> Dict[str, Any]:
+def user_ner_tool(state: dict) -> Dict[str, Any]:
     """
     (1) 사용자 입력 NER 추출
     (1-1) NER 데이터가 없거나 누락된 항목은 user_profile (age, location, jobType)로 보완
     입력 데이터: {"user_message": str, "user_profile": dict}
     """
-    user_message = input_data.get("messages", "")
-    user_profile = input_data.get("user_profile", {})
-
-    logger.info(f"[user_ner_tool] user_message={user_message}")
-
-    # 입력 검증 강화
-    if not user_message:  # 빈 입력 처리
-        logger.warning("Empty user message received")
-        return {"직무": "", "지역": "", "연령대": ""}
-
-    # LLM 기반 NER 호출 (여기서는 get_user_ner_runnable을 사용)
-    ner_chain = get_user_ner_runnable()
-    ner_res = ner_chain.invoke({"user_query": user_message})
-    # 결과 처리 개선
-    ner_str = getattr(ner_res, "content", str(ner_res))
-    cleaned =  ner_str.replace("```json", "").replace("```", "").strip()
-
-    logger.info(f"[user_ner_tool] 중간 NER 결과: {cleaned}")
-
-
     try:
-        user_ner = json.loads(cleaned)
-    except json.JSONDecodeError:
-        logger.warning(f"[user_ner_tool] NER parse fail: {cleaned}")
-        user_ner = {}
+        # 메시지 추출
+        state_dict = StateDict(**state)
+        user_message = state_dict.messages
+        user_profile = state_dict.user_profile
 
-    # 프로필 보완
-    if not user_ner.get("직무") and user_profile.get("jobType"):
-        user_ner["직무"] = user_profile["jobType"]
-    if not user_ner.get("지역") and user_profile.get("location"):
-        user_ner["지역"] = user_profile["location"]
-    if not user_ner.get("연령대") and user_profile.get("age"):
-        user_ner["연령대"] = user_profile["age"]
+        logger.info(f"[user_ner_tool] user_message={user_message}")
 
-    logger.info(f"[user_ner_tool] 최종 NER 결과: {user_ner}")
-    return user_ner
+        # 입력 검증 강화
+        if not user_message:  # 빈 입력 처리
+            logger.warning("Empty user message received")
+            return {"직무": "", "지역": "", "연령대": ""}
+
+        # LLM 기반 NER 체인인
+        ner_chain = get_user_ner_runnable()
+        ner_res = ner_chain.invoke({"user_query": user_message})
+        ner_str = getattr(ner_res, "content", str(ner_res))
+        cleaned =  ner_str.replace("```json", "").replace("```", "").strip()
+
+        logger.info(f"[user_ner_tool] 중간 NER 결과: {cleaned}")
+
+        try:
+            user_ner_result = json.loads(cleaned)
+        except json.JSONDecodeError:
+            logger.warning(f"[user_ner_tool] NER parse fail: {cleaned}")
+            user_ner = {}
+
+        # 프로필 보완
+        user_ner_result = {
+            "직무": user_ner.get("직무") or user_profile.get("jobType", ""),
+            "지역": user_ner.get("지역") or user_profile.get("location", ""),
+            "연령대": user_ner.get("연령대") or user_profile.get("age", "")
+        }
+
+        logger.info(f"[user_ner_tool] 최종 NER 결과: {user_ner_result}")
+        return {"user_ner": user_ner_result}
+    except Exception as e:
+        logger.error(f"NER 툴 오류: {str(e)}")
+        return {"user_ner": {}}
 
 @tool
 def profile_update_tool(ner_data: Dict[str, str]) -> str:
@@ -168,164 +171,154 @@ def profile_update_tool(ner_data: Dict[str, str]) -> str:
     return GLOBAL_USER_PROFILE.get_profile_summary()
 
 @tool
-def vector_search_tool(_: str) -> Dict[str, Any]:
-    """
-    GLOBAL_USER_PROFILE 기반으로 벡터 검색
-    """
-    vs = VectorStoreSearch(vectorstore=None)  # 실제 Chroma 인스턴스
-    jobs = GLOBAL_USER_PROFILE.data.get("preferred_jobs", [])
-    loc = GLOBAL_USER_PROFILE.data.get("location", "")
+def vector_search_tool(state: StateDict) -> Dict[str, Any]:
+    """벡터 검색 툴 개선"""
+    try:
+        vs = VectorStoreSearch(vectorstore=None)  # 실제 Chroma 인스턴스
+        user_ner = state.get("user_ner", {})
+        docs = vs.search_jobs(user_ner, top_k=5)
 
-    user_ner = {"직무": ",".join(jobs), "지역": loc}
-    docs = vs.search_jobs(user_ner, top_k=5)
+        if not docs:
+            return {
+                "job_postings": [],
+                "messages": "조건에 맞는 채용 공고가 없습니다."
+            }
 
-    if not docs:
+        job_postings = []
+        for i, doc in enumerate(docs, start=1):
+            md = doc.metadata
+            job_postings.append({
+                "id": md.get("채용공고ID", f"doc_{i}"),
+                "location": md.get("근무지역", ""),
+                "company": md.get("회사명", ""),
+                "title": md.get("채용제목", ""),
+                "salary": md.get("급여조건", ""),
+                "rank": i
+            })
+
+        logger.info(f"[vector_search_tool] 최종 job_postings 결과: {job_postings}")
+
         return {
-            "job_postings": [],
-            "messages": "조건에 맞는 채용 공고가 없습니다."
+            "job_postings": job_postings,
+            "messages": "채용 공고 검색 결과"
         }
-
-    job_postings = []
-    for i, doc in enumerate(docs, start=1):
-        md = doc.metadata
-        job_postings.append({
-            "id": md.get("채용공고ID", f"doc_{i}"),
-            "location": md.get("근무지역", ""),
-            "company": md.get("회사명", ""),
-            "title": md.get("채용제목", ""),
-            "salary": md.get("급여조건", ""),
-            "rank": i
-        })
-
-    logger.info(f"[vector_search_tool] 최종 job_postings 결과: {job_postings}")
-
-    return {
-        "job_postings": job_postings,
-        "messages": "채용 공고 검색 결과"
-    }
+    except Exception as e:
+        logger.error(f"Vector search failed: {str(e)}")
+        return {"job_postings": []}
 
 @tool
-def final_response_tool(input_data: Dict) -> str:
+def final_response_tool(state: StateDict) -> Dict[str, Any]:
     """
     LLM을 사용하여 최종 답변 문자열을 생성
     input_data: {"messages": "...", "user_profile": "...", "job_postings": [...]}
     """
-    messages = input_data.get("messages", "")
-    user_profile = input_data.get("user_profile", "")
-    postings = input_data.get("job_postings", [])
+    try:
+        messages = state.get("messages", [])
+        user_profile = state.get("user_profile", {})
+        postings = state.get("job_postings", [])
 
-    llm = setup_openai(0.5)
+        llm = setup_openai(0.5)
+        
+        system_msg = SystemMessage(content=SYSTEM_PROMPT)
+        user_prompt = (
+            f"사용자 발화: {messages}\n"
+            f"프로필 요약: {user_profile}\n"
+            f"검색된 채용공고 수: {len(postings)}\n"
+            "위 정보를 종합해 한 문장으로 안내해줘."
+        )
+        resp = llm.invoke([system_msg, HumanMessage(content=user_prompt)])
+
+        logger.info(f"[final_response_tool] 최종 resp 결과: {resp}")
+
+        return resp
+    except Exception as e:
+        logger.error(f"Response generation failed: {str(e)}")
+        return {
+            "final_answer": "죄송합니다. 응답을 생성하는 중 오류가 발생했습니다.",
+            "messages": [AIMessage(content="응답 생성 중 오류가 발생했습니다.")]
+        }
     
-    system_msg = SystemMessage(content=SYSTEM_PROMPT)
-    user_prompt = (
-        f"사용자 발화: {messages}\n"
-        f"프로필 요약: {user_profile}\n"
-        f"검색된 채용공고 수: {len(postings)}\n"
-        "위 정보를 종합해 한 문장으로 안내해줘."
-    )
-    resp = llm.invoke([system_msg, HumanMessage(content=user_prompt)])
-
-    logger.info(f"[final_response_tool] 최종 resp 결과: {resp}")
-
-    return resp
 
 ###############################################################################
 # (B) 각 Node 함수: Tool을 호출
 ###############################################################################
-def user_ner_node(state: Dict) -> Dict:
-    """
-    user_ner_tool 호출 -> state["ner_result"]에 저장
-    """
-    user_input = state.get("messages", "")
-    user_profile = state.get("user_profile", {})
-
-    logger.info(f"[user_ner_node] user_input={user_input}")
-    logger.info(f"[user_ner_node] user_profile={user_profile}")
-
-    # 수정 후 ✅ input_data 필드 추가
-    ner_dict = user_ner_tool.invoke({
-        "input_data": {  # Pydantic 모델 구조에 맞게 감싸기
-            "messages": user_input,
-            "user_profile": user_profile
-        }
-    })
-    # 수정된 부분: 새 객체 생성 후 필드 추가
-    state.user_ner = ner_dict
-    logger.info(f"[user_ner_node] ner_dict={ner_dict}")
-    return state
+# Simplified node functions that just call tools
+def user_ner_node(state: StateDict) -> Dict:
+    """Call user_ner_tool and update state"""
+    try:
+        result = user_ner_tool.invoke(state)
+        return StateDict(**{**state, **result})  # 결과 병합
+    except Exception as e:
+        logger.error(f"user_ner_node 오류: {str(e)}")
+        return state
 
 def profile_update_node(state: Dict) -> Dict:
-    """
-    profile_update_tool 호출 -> state["profile_summary"]에 저장
-    """
-    ner_dict = state.get("ner_result", {})
-    summary = profile_update_tool.invoke({"ner_data": ner_dict})
-    state.profile_summary = summary
-    return state
+    """Call profile_update_tool and update state"""
+    result = profile_update_tool.invoke(state)
+    return {**state, **result}
 
 def vector_search_node(state: Dict) -> Dict:
-    """
-    state["vector_search"] (메인에서 주입한 객체)를 사용하여 채용 검색을 수행하고,
-    결과를 state["job_postings"]에 저장합니다.
-    """
-    vector_search = VectorStoreSearch(vectorstore=VectorStoreIngest().setup_vector_store())  # ✅ 직접 초기화
-    if not vector_search:
-        raise ValueError("vector_search 객체가 state에 없습니다.")
-    
-    jobs = GLOBAL_USER_PROFILE.data.get("preferred_jobs", [])
-    loc = GLOBAL_USER_PROFILE.data.get("location", "")
-    user_ner = {"직무": ",".join(jobs), "지역": loc}
-    docs = vector_search.search_jobs(user_ner, top_k=5)
-    job_list = []
-    for i, doc in enumerate(docs, start=1):
-        md = doc.metadata
-        job_list.append({
-            "id": md.get("채용공고ID", f"doc_{i}"),
-            "location": md.get("근무지역", ""),
-            "company": md.get("회사명", ""),
-            "title": md.get("채용제목", ""),
-            "salary": md.get("급여조건", ""),
-            "rank": i
-        })
-    state.job_postings = job_list
-    return state
+    """Call vector_search_tool and update state"""
+    result = vector_search_tool.invoke(state)
+    return {**state, **result}
 
 def final_response_node(state: Dict) -> Dict:
-    """
-    최종 응답 도출: 사용자 입력, 프로필 요약, 검색 결과를 종합하여 final_response_tool을 호출하고,
-    결과를 state["final_answer"]에 저장합니다.
-    """
-    messages = state.get("messages", "")
-    user_profile = state.get("user_profile", "")
-    postings = state.get("job_postings", [])
+    """Call generate_response_tool and update state"""
+    result = final_response_tool.invoke(state)
+    return {**state, **result}
 
-    logger.info(f"[final_response_node] postings={postings}")
+# 커스텀 조건 함수 구현
+def custom_tools_condition(state: StateDict) -> str:
+    """툴 호출 여부 판단 로직 강화"""
+    last_message = state["messages"][-1]
+    return "tools" if hasattr(last_message, 'tool_calls') else END
 
-    payload = {
-        "input_data": {  # Pydantic 모델 구조에 맞게 감싸기
-            "messages": messages,
-            "user_profile": user_profile,
-            "job_postings": postings
-        }
-    }
-    answer = final_response_tool.invoke(payload)
-    
-    # jobPostings 배열을 JobPosting 모델로 변환 (필요 시)
-    job_postings_list = []
-    for idx, jp in enumerate(postings, start=1):
-        job_postings_list.append(JobPosting(
-            id=str(jp.get("id", "no_id")),  # id를 문자열로 변환
-            location=jp.get("location", ""),
-            company=jp.get("company", ""),
-            title=jp.get("title", ""),
-            salary=jp.get("salary", ""),
-            workingHours=jp.get("workingHours", "정보없음"),
-            description="",
-            rank=idx
-        ))
-    state.job_postings = job_postings_list
-    state.final_answer = answer
-    return state
+def chatbot_node(state: StateDict, llm_with_tools: ChatOpenAI) -> dict:
+    """
+    챗봇 노드는 시스템 메시지와 사용자 프로필 정보를 추가하여 LLM을 호출하고,
+    그 결과를 state["messages"]에 저장합니다.
+    이 노드는 그래프 외부에서 별도로 호출됩니다.
+    """
+    try:
+        # 메시지 구성
+        messages = [SystemMessage(content=SYSTEM_PROMPT), *state["messages"]]
+        # 기존 메시지 추가
+        if hasattr(state, 'messages') and state.messages:
+            for msg in state.messages:
+                if isinstance(msg, (HumanMessage, SystemMessage, AIMessage)):
+                    messages.append(msg)
+                elif isinstance(msg, dict) and 'content' in msg:
+                    if msg.get('role') == 'user':
+                        messages.append(HumanMessage(content=msg['content']))
+                    elif msg.get('role') == 'assistant':
+                        messages.append(AIMessage(content=msg['content']))
+                    elif msg.get('role') == 'system':
+                        messages.append(SystemMessage(content=msg['content']))
+        
+        # 프로필 정보를 문자열로 변환하여 컨텍스트에 추가
+        # 프로필 정보 접근 방식 변경
+        if "user_profile" in state and state["user_profile"]:
+            profile_info = f"\n현재 사용자 정보:\n{str(state['user_profile'])}"
+            messages.append(SystemMessage(content=profile_info))
+        
+        # 도구 호출 가능한 LLM 실행
+        response = llm_with_tools.invoke(messages)
+
+        logger.info(f"[chat_node] user_ner 확인: {state.get('user_ner', {})}")
+        
+        # 툴 호출 감지
+        if hasattr(response, "tool_calls") and response.tool_calls:
+            return {
+                "messages": [response],
+                "tool_calls": [tc for tc in response.tool_calls]
+            }
+        
+        # 일반 응답
+        return {"messages": [response]}
+    except Exception as e:
+        print(f"챗봇 노드 처리 중 오류: {str(e)}")
+        return {"messages": [AIMessage(content="죄송합니다. 응답을 생성하는 중에 문제가 발생했습니다. 다시 한 번 말씀해 주시겠어요?")]}
+
 
 ###############################################################################
 # (C) 그래프 생성
@@ -338,7 +331,7 @@ def build_job_advisor_graph(llm: ChatOpenAI, vector_search: VectorStoreSearch) -
     """
     # 1) LLM 준비
     llm = setup_openai(0.5)
-    tools = [vector_search_tool, user_ner_tool, profile_update_tool, final_response_tool]
+    tools = [user_ner_tool, final_response_tool]
 
     llm_with_tools = llm.bind_tools(tools)
 
@@ -391,9 +384,9 @@ def build_job_advisor_graph(llm: ChatOpenAI, vector_search: VectorStoreSearch) -
     # 엣지 연결
     # 조건부 라우팅
     builder.add_edge("tools", "chatBot")
-    builder.add_edge(START, "userNer")
-    builder.add_edge("userNer", "chatBot")
+    builder.add_edge(START, "chatBot")
     builder.add_conditional_edges("chatBot", tools_condition)
+    builder.add_edge("chatBot", "userNer")
     builder.add_edge("userNer", "profileUpdate")
     builder.add_edge("profileUpdate", "vectorSearch")
     builder.add_edge("vectorSearch", "finalResponse")
@@ -417,11 +410,12 @@ def handle_chat(query: str, user_profile: Dict[str, Any], vector_search: VectorS
     """
     logger.info(f"[handle_chat] query={query}, user_profile={user_profile}")
     # StateDict를 사용하여 상태를 초기화 (추가 필드 vector_search 포함)
-    state = StateDict(
-        messages=[HumanMessage(content=query)],
-        user_profile=user_profile
-    )
-
+    state = {
+        "messages": [HumanMessage(content=query)],
+        "user_profile": user_profile,
+        "user_input": query,  # 반드시 추가: user_ner_node에서 사용됨
+        "vector_search": vector_search
+    }
     llm_instance = setup_openai(0.5)
 
     # 그래프 빌드
