@@ -229,7 +229,7 @@ def final_response_tool(input_data: Dict) -> str:
 
     logger.info(f"[final_response_tool] 최종 resp 결과: {resp}")
 
-    return resp
+    return resp.content
 
 ###############################################################################
 # (B) 각 Node 함수: Tool을 호출
@@ -441,13 +441,13 @@ def handle_chat(query: str, user_profile: Dict[str, Any], vector_search: VectorS
         {"configurable": {"thread_id": "demo-user"}},
         # stream_mode="values"
     )
+    logger.info(f"[handle_chat] result 결과: {result}")
     # 결과 업데이트
     state.user_ner = result.get("user_ner", {})
     state.profile_summary = result.get("profile_summary", "")
     state.job_postings = result.get("job_postings", [])
     state.final_answer = result.get("final_answer", "")
 
-    logger.info(f"[handle_chat] state 결과: {state}")
 
     final_answer = state["final_answer"]
     job_postings = state["job_postings"]
